@@ -216,11 +216,5 @@ pytest tests/ -v
 ## Citation
 
 ```
-@inproceedings{pop2026,
-  title     = {Proof-of-Perception: Certified Tool-Using Multimodal Reasoning
-               with Compositional Conformal Guarantees},
-  booktitle = {CVPR},
-  year      = {2026},
-  note      = {Submission \#26934},
-}
+Coming soon!
 ```
