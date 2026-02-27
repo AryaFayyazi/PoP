@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -115,6 +115,45 @@ class OCRNode(BaseNode):
         # Trainable certificate head  g^(t)_ψ  (Eq. 18)
         self.cert_head = ConformityHead(input_dim=feature_dim)
 
+    def _call_ocr(
+        self,
+        spec: NodeSpec,
+        images: List[Any],
+    ) -> Tuple[List[str], List[float]]:
+        """
+        Generate OCR candidate strings and their model probabilities.
+
+        Override this method to integrate a real OCR engine.  The conformal
+        filtering logic in ``execute`` remains unchanged regardless of how
+        this method is implemented.
+
+        Parameters
+        ----------
+        spec : NodeSpec
+            The node specification (tool_key, region, prompt).
+        images : list
+            Full list of input images; use ``spec.region["image_index"]`` to
+            select the relevant image and ``spec.region["bbox"]`` for cropping.
+
+        Returns
+        -------
+        candidates : List[str]
+            Candidate OCR output strings.  The first element should be the
+            MAP (highest-probability) prediction.
+        probs : List[float]
+            Corresponding model probability estimates in [0, 1], one per
+            candidate (need not sum to 1).
+        """
+        candidates: List[str] = [
+            "candidate_0",
+            "candidate_1",
+            "candidate_2",
+            "candidate_3",
+            "candidate_4",
+        ]
+        probs: List[float] = [0.60, 0.20, 0.10, 0.07, 0.03]
+        return candidates, probs
+
     def execute(
         self,
         spec: NodeSpec,
@@ -125,23 +164,15 @@ class OCRNode(BaseNode):
         """
         Return the conformal set Γ^(ocr)_δ(x_v) of OCR string candidates.
 
-        Stub implementation produces synthetic candidates with simulated
-        model probabilities.  In production, call the OCR tool / MLLM and
-        supply real ``(candidates, probs)``; the conformal filtering logic
-        below remains unchanged.
+        Calls ``_call_ocr`` to produce candidates and model probabilities,
+        then applies split-CP filtering (Eq. 16) with the given threshold.
+        Override ``_call_ocr`` to plug in a real OCR tool without touching
+        the conformal prediction logic here.
         """
-        # ---- Candidate generation (stub; replace with real OCR call) ----
-        # In production:
-        #   strings, probs = ocr_tool(image_crop, prompt=spec.prompt)
-        candidates: List[str] = [
-            "candidate_0",
-            "candidate_1",
-            "candidate_2",
-            "candidate_3",
-            "candidate_4",
-        ]
+        # ---- Candidate generation (via override-able hook) ---------------
+        candidates, raw_probs = self._call_ocr(spec, images)
         # Simulated token probabilities (sum ≤ 1; first = MAP prediction)
-        model_probs = torch.tensor([0.60, 0.20, 0.10, 0.07, 0.03])
+        model_probs = torch.tensor(raw_probs, dtype=torch.float32).clamp(0.0, 1.0)
         candidate_ids = torch.arange(len(candidates))
 
         # ---- Nonconformity scores  s^(ocr)(x_v, z) = 1 − P_θ(z | x_v) ----
@@ -190,6 +221,38 @@ class DetectionNode(BaseNode):
         self.feature_dim = feature_dim
         self.cert_head = ConformityHead(input_dim=feature_dim)
 
+    def _call_detector(
+        self,
+        spec: NodeSpec,
+        images: List[Any],
+    ) -> List[List[float]]:
+        """
+        Run the object detector and return candidate bounding boxes.
+
+        Override this method to integrate a real object detector.  Boxes must
+        be ordered by **descending** detection confidence; the first box is
+        treated as the MAP prediction and anchors the IoU-based nonconformity
+        score.
+
+        Parameters
+        ----------
+        spec : NodeSpec
+            The node specification (tool_key, region, prompt).
+        images : list
+            Full list of input images.
+
+        Returns
+        -------
+        List[List[float]]
+            Each element is a box [x1, y1, x2, y2], ordered by descending
+            confidence (index 0 = MAP box with highest detector score).
+        """
+        return [
+            [10.0, 10.0, 100.0, 100.0],   # MAP box (highest detector score)
+            [12.0, 12.0, 102.0,  98.0],   # slight positive shift
+            [ 8.0,  8.0,  98.0, 102.0],   # slight negative shift
+        ]
+
     def execute(
         self,
         spec: NodeSpec,
@@ -200,19 +263,15 @@ class DetectionNode(BaseNode):
         """
         Return the conformal set Γ^(det)_δ(x_v) of bounding-box candidates.
 
-        Stub implementation; replace with a real object-detector call that
-        returns ``(boxes_tensor, scores_tensor)`` and update the MAP box
-        accordingly.
+        Calls ``_call_detector`` to produce candidate boxes (ordered by
+        descending confidence), then applies IoU-based nonconformity scoring
+        (Eq. 10) and split-CP filtering (Eq. 16).  Override ``_call_detector``
+        to plug in a real detector without modifying the conformal logic here.
         """
-        # ---- Candidate generation (stub; replace with real detector) -----
-        # In production:
-        #   boxes, det_scores = detector(image_crop, prompt=spec.prompt)
-        #   map_box = boxes[det_scores.argmax()]
-        candidate_boxes_data: List[List[float]] = [
-            [10.0, 10.0, 100.0, 100.0],   # MAP box (highest detector score)
-            [12.0, 12.0, 102.0,  98.0],   # slight positive shift
-            [ 8.0,  8.0,  98.0, 102.0],   # slight negative shift
-        ]
+        # ---- Candidate generation (via override-able hook) ---------------
+        # In production, override _call_detector to call the real detector:
+        #   boxes_list = detector(image_crop, prompt=spec.prompt)
+        candidate_boxes_data = self._call_detector(spec, images)
         candidate_boxes = torch.tensor(candidate_boxes_data)  # [K, 4]
         map_box = candidate_boxes[0]                           # [4]
 
@@ -264,6 +323,34 @@ class ChartNode(BaseNode):
         self.feature_dim = feature_dim
         self.cert_head = ConformityHead(input_dim=feature_dim)
 
+    def _call_chart_parser(
+        self,
+        spec: NodeSpec,
+        images: List[Any],
+    ) -> Tuple[float, List[float]]:
+        """
+        Parse the chart and return (predicted_mean, candidate_values).
+
+        Override this method to integrate a real chart-parsing model.  The
+        conformal filtering in ``execute`` remains unchanged.
+
+        Parameters
+        ----------
+        spec : NodeSpec
+            The node specification (tool_key, region, prompt).
+        images : list
+            Full list of input images.
+
+        Returns
+        -------
+        pred_mean : float
+            The model's point-estimate μ_θ(x_v) for the chart value.
+        candidates : List[float]
+            Candidate numeric values to score against the mean.  The first
+            element should equal (or be closest to) pred_mean.
+        """
+        return 42.0, [42.0, 41.0, 43.0, 40.0, 44.0]
+
     def execute(
         self,
         spec: NodeSpec,
@@ -274,15 +361,17 @@ class ChartNode(BaseNode):
         """
         Return the conformal set Γ^(chart)_δ(x_v) of numeric chart values.
 
-        Stub implementation; replace with a real chart-parser / MLLM numeric
-        prediction that supplies ``pred_mean`` and ``candidates_raw``.
+        Calls ``_call_chart_parser`` to obtain the predicted mean and candidate
+        numeric values, then applies the absolute-residual nonconformity score
+        (Eq. 11) and split-CP filtering (Eq. 16).  Override
+        ``_call_chart_parser`` to plug in a real chart parser.
         """
-        # ---- Candidate generation (stub; replace with real chart parser) -
-        # In production:
-        #   pred_mean, candidates_raw = chart_parser(image_crop, prompt=spec.prompt)
-        pred_mean = torch.tensor(42.0)
-        candidates_raw: List[float] = [42.0, 41.0, 43.0, 40.0, 44.0]
-        candidates_tensor = torch.tensor(candidates_raw)
+        # ---- Candidate generation (via override-able hook) ---------------
+        # In production, override _call_chart_parser to call the real parser:
+        #   pred_mean_val, candidates_raw = chart_parser(image_crop, prompt=spec.prompt)
+        pred_mean_val, candidates_raw = self._call_chart_parser(spec, images)
+        pred_mean = torch.tensor(float(pred_mean_val))
+        candidates_tensor = torch.tensor(candidates_raw, dtype=torch.float32)
 
         # ---- Nonconformity scores  s^(num)(x_v, z) = |z − μ_θ(x_v)| -----
         scores = nonconformity_numeric(pred_mean, candidates_tensor)  # [K] ≥ 0
