@@ -133,8 +133,8 @@ answer_set, graph = model.infer(
 
 ### Integrating Real Tools
 
-The stub implementations in `pop/nodes/__init__.py` can be replaced with real tool
-calls by sub-classing `BaseNode`:
+The stub implementations in `pop/nodes/__init__.py` expose protected hooks that
+can be overridden in subclasses without touching the conformal prediction logic:
 
 ```python
 import paddleocr
@@ -148,10 +148,17 @@ class PaddleOCRNode(OCRNode):
     def _call_ocr(self, spec, images):
         img = images[spec.region["image_index"]]
         result = self.ocr_engine.ocr(img, cls=True)
-        return [line[1][0] for block in result for line in block]
+        texts = [line[1][0] for block in result for line in block]
+        confs = [line[1][1] for block in result for line in block]
+        return texts, confs  # (candidates, probs)
 
 model.registry.register("ocr", PaddleOCRNode())
 ```
+
+Similarly, `DetectionNode` exposes `_call_detector(self, spec, images) -> List[List[float]]`
+(boxes ordered by descending confidence) and `ChartNode` exposes
+`_call_chart_parser(self, spec, images) -> Tuple[float, List[float]]`
+(predicted mean and candidate values).
 
 ---
 
